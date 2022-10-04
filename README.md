@@ -16,7 +16,7 @@ To deploy this project run
 
 ## Authors
 
-- [@octokatherine](https://github.com/VaibhavMakde)
+- [@VaibhavMakde](https://github.com/VaibhavMakde)
 
 
 ## Run Locally
