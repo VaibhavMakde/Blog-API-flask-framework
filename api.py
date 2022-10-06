@@ -21,7 +21,7 @@ app.config['SQLALCHEMY_DATABASE_URI'] = 'sqlite://////home/vaibhav/PycharmProjec
 app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
 
 # set up the Flask-JWT-Extended extension
-app.config["JWT_SECRET_KEY"] = "super-secret"  # Change this!
+app.config["JWT_SECRET_KEY"] = "super-secret"
 jwt = JWTManager(app)
 
 db = SQLAlchemy(app)
@@ -74,7 +74,7 @@ class Comment(db.Model):
 
 
 class Blog(db.Model):
-    # __searchable__ == ['title','blog','author']
+
     id = db.Column(db.Integer, primary_key=True)
     title = db.Column(db.String(100))
     blog = db.Column(db.String(500))
@@ -109,9 +109,7 @@ class UserSchema(ma.SQLAlchemyAutoSchema):
         model = User
         load_instance = True
         include_relationships = True
-        fields = ('id', 'public_id', 'username', 'password', 'admin', 'blogs')
-
-    blogs = ma.Nested(BlogSchema, many=True)
+        fields = ('id', 'public_id', 'username', 'admin')
 
 
 ################################   swagger specific  ####################################################
