@@ -1,41 +1,64 @@
 import datetime
 from functools import wraps
 from flask_marshmallow import Marshmallow, fields
-from flask import Flask, request, jsonify, make_response
+from flask import Flask, request, jsonify, make_response, flash
 from flask_sqlalchemy import SQLAlchemy
 from werkzeug.security import generate_password_hash, check_password_hash
 import uuid
-import jwt
 from flask_migrate import Migrate
 from flask_swagger_ui import get_swaggerui_blueprint
+from flask_login import LoginManager
+from flask_jwt_extended import create_access_token
+from flask_jwt_extended import get_jwt_identity
+from flask_jwt_extended import jwt_required
+from flask_jwt_extended import JWTManager
+
+#######################    APP CONFIG HERE  ########################################
 
 app = Flask(__name__)
 app.config['SECRET_KEY'] = 'thisissecret'
 app.config['SQLALCHEMY_DATABASE_URI'] = 'sqlite://////home/vaibhav/PycharmProjects/blog3-api-flask (copy)/blog.db'
 app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
 
-# swagger configs
-SWAGGER_URL = '/swagger'
-API_URL = "/static/swagger.json"
-
-SWAGGER_BLUEPRINT = get_swaggerui_blueprint(
-    SWAGGER_URL,
-    API_URL,
-    config={
-        'app_name': "Todo List API"
-    }
-)
-app.register_blueprint(SWAGGER_BLUEPRINT, url_prifix=SWAGGER_URL)
+# set up the Flask-JWT-Extended extension
+app.config["JWT_SECRET_KEY"] = "super-secret"  # Change this!
+jwt = JWTManager(app)
 
 db = SQLAlchemy(app)
 ma = Marshmallow(app)
+
+# adding migration
 migrate = Migrate(app, db)
 
+'''Steps for migration
+1. export FLASK_APP=file_name.py
+2. flask db init
+3. flask db migrate
+4. flask db upgrade
+'''
+
+# authentication and authorization setting
+login_manager = LoginManager()
+
+'''
+Flask-login also requires you to define a “user_loader” function which,
+given a user ID, returns the associated user object.
+The @login_manager.user_loader 
+piece tells Flask-login how to load users given an id.'''
+
+
+@login_manager.user_loader
+def load_user(user_id):
+    return User.query.get(int(user_id))
+
+
+#######################  MODELS HERE  ########################################
 
 class User(db.Model):
     id = db.Column(db.Integer, primary_key=True)
     public_id = db.Column(db.String(50), unique=True)
     username = db.Column(db.String(50))
+    email = db.Column(db.String(150), unique=True, nullable=True)
     password = db.Column(db.String(80))
     admin = db.Column(db.Boolean)
     blogs = db.relationship('Blog', backref='user')
@@ -60,6 +83,8 @@ class Blog(db.Model):
     comments = db.relationship('Comment', backref='blog')
 
 
+#######################    MODELS SCHEMA USING MARSHMALLOW HERE  ########################################
+
 class CommentSchema(ma.SQLAlchemyAutoSchema):
     class Meta:
         model = Comment
@@ -67,7 +92,6 @@ class CommentSchema(ma.SQLAlchemyAutoSchema):
         include_relationships = True
         fields = ('id', 'text', 'author', 'post_id')
         # include_fk = True
-
 
 class BlogSchema(ma.SQLAlchemyAutoSchema):
     class Meta:
@@ -90,97 +114,106 @@ class UserSchema(ma.SQLAlchemyAutoSchema):
     blogs = ma.Nested(BlogSchema, many=True)
 
 
-def token_required(f):
-    @wraps(f)
-    def decorated(*args, **kwargs):
-        token = None
-        print(request.headers)
+################################   swagger specific  ####################################################
 
-        if 'X-Access-Token' in request.headers:
-            token = request.headers['x-access-token']
-            print('token :', token)
+# swagger configs
+SWAGGER_URL = '/swagger'
+API_URL = "/static/swagger.json"
 
-        if not token:
-            return jsonify({'message': 'Token is missing!'}), 401
-
-        try:
-            data = jwt.decode(token, app.config['SECRET_KEY'], algorithms=['HS256'])
-            print("data:", data)
-            current_user = User.query.filter_by(public_id=data['public_id']).first()
-            print("current_user", current_user.username)
-        except:
-            return jsonify({'message': 'Token is invalid!'}), 401
-
-        return f(current_user, *args, **kwargs)
-
-    return decorated
+SWAGGER_BLUEPRINT = get_swaggerui_blueprint(
+    SWAGGER_URL,
+    API_URL,
+    config={
+        'app_name': "Blog Post API"
+    }
+)
+app.register_blueprint(SWAGGER_BLUEPRINT, url_prifix=SWAGGER_URL)
 
 
-@app.route('/user', methods=['GET'])
-@token_required
-def get_all_users(current_user):
-    print("all users")
-    print("current  :", current_user)
-    if not current_user.admin:
-        return jsonify({'message': 'User is Not Admin !! Cannot perform that function!'})
+##########################      USER REGISTER AND LOGIN CODE HERE     #####################################
 
-    users = User.query.all()
+@app.route('/signup', methods=['POST'])
+def signup():
+    username = request.json.get("username", None)
+    email = request.json.get("email", None)
+    password = request.json.get("password", None)
 
-    # marshmallow serialization on user
-    user_schema = UserSchema(many=True)
-    output = user_schema.dump(users)
+    username_exists = User.query.filter_by(username=username).first()
+    if username_exists:
+        return jsonify({'message': 'Username already exits !'})
 
-    return jsonify({'users': output})
+    email_exists = User.query.filter_by(email=email).first()
+    if email_exists:
+        return jsonify({'message': 'email already exits !'})
 
-
-@app.route('/user/<public_id>', methods=['GET'])
-@token_required
-def get_one_user(current_user, public_id):
-    if not current_user.admin:
-        return jsonify({'message': 'Cannot perform that function!'})
-
-    user = User.query.filter_by(public_id=public_id).first()
-
-    if not user:
-        return jsonify({'message': 'No user found!'})
-
-    # user_data = {}
-    # user_data['public_id'] = user.public_id
-    # user_data['username'] = user.username
-    # user_data['password'] = user.password
-    # user_data['admin'] = user.admin
-
-    userSchema = UserSchema()
-    output = userSchema.dump(user)
-    print(output)
-
-    return jsonify({'user': output})
-
-
-@app.route('/user', methods=['POST'])
-@token_required
-def create_user(current_user):
-    if not current_user.admin:
-        return jsonify({'message': 'User is Not Admin !! Cannot perform that function!'})
-
-    data = request.get_json()
-    print(data)
-
-    hashed_password = generate_password_hash(data['password'], method='sha256')
+    hashed_password = generate_password_hash(password=password, method='sha256')
     print(hashed_password)
-    new_user = User(public_id=str(uuid.uuid4()), username=data['username'], password=hashed_password, admin=False)
+    new_user = User(public_id=str(uuid.uuid4()), username=username, email=email, password=hashed_password,
+                    admin=False)
     print(new_user)
     db.session.add(new_user)
     db.session.commit()
     return jsonify({'message': 'New user created!'})
 
 
-@app.route('/user/<public_id>', methods=['PUT'])
-@token_required
-def promote_user(current_user, public_id):
-    if not current_user.admin:
-        return jsonify({'message': 'User is Not Admin !! Cannot perform that function!'})
+@app.route('/login', methods=["POST"])
+def login_user():
+    username = request.json.get("username", None)
+    password = request.json.get("password", None)
+    user = User.query.filter_by(username=username).first()
+    print(user)
+    if user:
+        if check_password_hash(user.password, password):
+            access_token = create_access_token(identity=username)
+            print(access_token)
+            return jsonify(access_token=access_token)
+            return jsonify({'message': 'Logged in successfully!'})
 
+        else:
+            return jsonify({'message': 'Incorrect Password !'})
+
+    else:
+        return jsonify({'message': "User does not exits !!!"})
+
+
+@app.route('/user', methods=['GET'])
+@jwt_required()
+def get_all_users():
+    # Access the identity of the current user with get_jwt_identity
+    current_user = get_jwt_identity()
+    print(current_user)
+    access_token = create_access_token(identity=current_user)
+    users = User.query.all()
+
+    if users:
+        # marshmallow serialization on user
+        user_schema = UserSchema(many=True)
+        output = user_schema.dump(users)
+
+        return jsonify({'users': output})
+    else:
+        return jsonify({'message': 'No user found'})
+
+
+@app.route('/user/<public_id>', methods=['GET'])
+@jwt_required()
+def get_one_user(public_id):
+    user = User.query.filter_by(public_id=public_id).first()
+
+    if not user:
+        return jsonify({'message': 'No user found!'})
+
+    user_schema = UserSchema()
+    output = user_schema.dump(user)
+    print(output)
+
+    return jsonify({'user': output})
+
+
+# promoting user to admin
+@app.route('/user/<public_id>', methods=['PUT'])
+@jwt_required()
+def promote_user(public_id):
     user = User.query.filter_by(public_id=public_id).first()
 
     if not user:
@@ -193,11 +226,8 @@ def promote_user(current_user, public_id):
 
 
 @app.route('/user/<public_id>', methods=['DELETE'])
-@token_required
-def delete_user(current_user, public_id):
-    if not current_user.admin:
-        return jsonify({'message': 'User is Not Admin !! Cannot perform that function!'})
-
+@jwt_required()
+def delete_user(public_id):
     user = User.query.filter_by(public_id=public_id).first()
 
     if not user:
@@ -209,32 +239,10 @@ def delete_user(current_user, public_id):
     return jsonify({'message': 'The user has been deleted!'})
 
 
-@app.route('/login')
-def login():
-    auth = request.authorization
-
-    if not auth or not auth.username or not auth.password:
-        return make_response('Could not verify', 401, {'WWW-Authenticate': 'Basic realm="Login required!"'})
-
-    user = User.query.filter_by(username=auth.username).first()
-
-    if not user:
-        return make_response('Could not verify', 401, {'WWW-Authenticate': 'Basic realm="Login required!"'})
-
-    if check_password_hash(user.password, auth.password):
-        token = jwt.encode(
-            {'public_id': user.public_id, 'exp': datetime.datetime.utcnow() + datetime.timedelta(minutes=60)},
-            app.config['SECRET_KEY'])
-
-        return jsonify({'token': token})
-
-    return make_response('Could not verify', 401, {'WWW-Authenticate': 'Basic realm="Login required!"'})
-
-
 @app.route('/blog', methods=['GET'])
-@token_required
-def get_all_blog(current_user):
-    blogs = Blog.query.filter_by(author=current_user.username).all()
+@jwt_required()
+def get_all_blog():
+    blogs = Blog.query.all()
 
     # Blog serialization using marshmallow
     blog_schema = BlogSchema(many=True)
@@ -244,9 +252,11 @@ def get_all_blog(current_user):
 
 
 @app.route('/blog/<blog_id>', methods=['GET'])
-@token_required
-def get_one_blog(current_user, blog_id):
-    blog = Blog.query.filter_by(id=blog_id, author=current_user.username).first()
+@jwt_required()
+def get_one_blog(blog_id):
+    current_user = get_jwt_identity()
+    access_token = create_access_token(identity=current_user)
+    blog = Blog.query.filter_by(id=blog_id).first()
     print(blog.author)
     if not blog:
         return jsonify({'message': 'No Blog found!'})
@@ -259,8 +269,10 @@ def get_one_blog(current_user, blog_id):
 
 
 @app.route('/blog/search', methods=['POST'])
-@token_required
-def search(current_user):
+@jwt_required()
+def search():
+    current_user = get_jwt_identity()
+    access_token = create_access_token(identity=current_user)
     data = request.get_json()
 
     try:
@@ -295,74 +307,81 @@ def search(current_user):
 
 
 @app.route('/blog', methods=['POST'])
-@token_required
-def create_blog(current_user):
-    data = request.get_json()
-    print(data)
+@jwt_required()
+def create_blog():
+    current_user = get_jwt_identity()
+    access_token = create_access_token(identity=current_user)
+    title = request.json.get("title", None)
+    blog = request.json.get("blog", None)
 
-    new_blog = Blog(title=data['title'], blog=data['blog'], author=current_user.username)
-    print(new_blog)
-    db.session.add(new_blog)
-    db.session.commit()
+    if title and blog:
+        new_blog = Blog(title=title, blog=blog, author=current_user)
+        db.session.add(new_blog)
+        db.session.commit()
 
-    return jsonify({'message': "Blog created!"})
+        return jsonify({'message': "Blog created!"})
+    else:
+        return jsonify({'message': "Blog does not created! missing some fields"})
 
 
 @app.route('/blog/<blog_id>', methods=['DELETE'])
-@token_required
-def delete_blog(current_user, blog_id):
-    blog = Blog.query.filter_by(id=blog_id, author=current_user.username).first()
-
-    if not blog:
+@jwt_required()
+def delete_blog(blog_id):
+    current_user = get_jwt_identity()
+    access_token = create_access_token(identity=current_user)
+    blog = Blog.query.filter_by(id=blog_id, author=current_user).first()
+    if blog:
+        db.session.delete(blog)
+        db.session.commit()
+        return jsonify({'message': 'BLog item deleted!'})
+    else:
         return jsonify({'message': 'No Blog found!'})
-
-    db.session.delete(blog)
-    db.session.commit()
-
-    return jsonify({'message': 'BLog item deleted!'})
 
 
 @app.route('/blog/<blog_id>/comment', methods=['GET'])
-@token_required
-def get_all_comment(current_user, blog_id):
+@jwt_required()
+def get_all_comment(blog_id):
+    current_user = get_jwt_identity()
+    access_token = create_access_token(identity=current_user)
+
     comments = Comment.query.filter_by(post_id=blog_id).all()
-    blog_id = Blog.query.filter_by(id=blog_id).first()
-
-    comment_schema = CommentSchema(many=True)
-    comment_data = comment_schema.dump(comments)
-
-    return jsonify(comment_data)
+    if comments:
+        comment_schema = CommentSchema(many=True)
+        comment_data = comment_schema.dump(comments)
+        return jsonify(comment_data)
+    else:
+        return jsonify({'message': "No comments found"})
 
 
 @app.route('/blog/<blog_id>/comment/<comment_id>', methods=['GET'])
-@token_required
-def get_one_comment(current_user, blog_id, comment_id):
+@jwt_required()
+def get_one_comment(blog_id, comment_id):
+    current_user = get_jwt_identity()
+    access_token = create_access_token(identity=current_user)
     comment = Comment.query.filter_by(id=comment_id).first()
-    blog = Blog.query.filter_by(id=blog_id, author=current_user.username).first()
+    blog = Blog.query.filter_by(id=blog_id).first()
+    print(comment)
+    print(blog)
 
-    print(comment.post_id)
+    if comment and blog:
+        comment_schema = CommentSchema()
+        comment_data = comment_schema.dump(comment)
+        comment_data['Blog'] = blog.blog
+        comment_data['Blog Title'] = blog.title
 
-    if not comment:
-        return jsonify({'message': 'No comment found!'})
+        return jsonify(comment_data)
 
-    comment_schema = CommentSchema()
-
-    comment_data = comment_schema.dump(comment)
-    blog_schema = BlogSchema()
-    blog_data = blog_schema.dump(blog)
-
-    comment_data['Blog'] = blog_data
-    print(type(comment_data))
-
-    return jsonify(comment_data)
+    else:
+        return jsonify({"message": "No comment Found !!!"})
 
 
 @app.route('/blog/<blog_id>/comment', methods=['POST'])
-@token_required
-def create_comment(current_user, blog_id):
+@jwt_required()
+def create_comment(blog_id):
     data = request.get_json()
-
-    new_comment = Comment(text=data['text'], author=current_user.username, post_id=blog_id)
+    current_user = get_jwt_identity()
+    access_token = create_access_token(identity=current_user)
+    new_comment = Comment(text=data['text'], author=current_user, post_id=blog_id)
 
     db.session.add(new_comment)
     db.session.commit()
@@ -371,12 +390,14 @@ def create_comment(current_user, blog_id):
 
 
 @app.route('/blog/<blog_id>/comment/<comment_id>', methods=['DELETE'])
-@token_required
-def delete_comment(current_user, blog_id, comment_id):
-    comment = Comment.query.filter_by(id=comment_id).first()
+@jwt_required()
+def delete_comment(blog_id, comment_id):
+    current_user = get_jwt_identity()
+    access_token = create_access_token(identity=current_user)
+    comment = Comment.query.filter_by(id=comment_id, author=current_user).first()
 
     if not comment:
-        return jsonify({'message': 'No Comment found!'})
+        return jsonify({'message': 'No Comment found by User!'})
 
     db.session.delete(comment)
     db.session.commit()
